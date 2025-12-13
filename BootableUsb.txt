@@ -1,0 +1,7 @@
+make usb bootable
+#	sudo dd if=/path/to/ubuntu.iso of=/dev/sdX bs=4M status=progress oflag=sync
+
+eject usb (safety/in case)
+#	sync
+#	sudo eject /dev/sdX
+

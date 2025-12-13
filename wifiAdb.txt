@@ -1,0 +1,18 @@
+# open tether page
+	adb shell am start -a android.settings.TETHER_SETTINGS
+
+# toggle hotspot with co-ordinates
+	adb shell input tap 935 530
+
+# connect phone 
+	adb tcpip 5555
+
+# find ip
+	adb shell ip route
+
+# connect
+	adb connect <phone_ip>:5555
+	adb connect 172.30.99.5:5555
+
+# scrcpy mobile screen off
+	crcpy --stay-awake --turn-screen-off

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-FLAC Metadata & Cover Art Fixer
-Fixes incorrect album metadata and finds proper cover art
+FLAC Cover Art Fixer
+Finds and adds proper cover art WITHOUT modifying existing metadata
 """
 
 import os
@@ -10,10 +10,10 @@ import requests
 from pathlib import Path
 import mutagen
 from mutagen.flac import FLAC
-from PIL import Image
 import io
 import argparse
 import re
+from PIL import Image
 
 def extract_info_from_filename(filename):
     name = Path(filename).stem
@@ -58,7 +58,7 @@ def search_album_by_track(artist, title):
                     album_artist = release.get('artist-credit', [{}])[0].get('artist', {}).get('name', '')
 
                     if album_title:
-                        # DO NOT allow “Various Artists” to overwrite track artist
+                        # DO NOT allow "Various Artists" to overwrite track artist
                         if album_artist.lower() == "various artists":
                             album_artist = artist  
 
@@ -154,29 +154,27 @@ def resize_cover(image_data, size):
     except:
         return image_data
 
-def update_flac_metadata(flac_path, track_artist, album_artist, album, title, cover_data=None):
+def update_flac_cover(flac_path, cover_data=None):
+    """Only updates cover art, preserves all existing metadata"""
     try:
         audio = FLAC(flac_path)
 
-        # Proper metadata
-        audio['artist'] = track_artist
-        audio['title'] = title
-        audio['album'] = album
-        audio['albumartist'] = album_artist
-
         if cover_data:
+            # Clear existing pictures and add new one
             audio.clear_pictures()
             picture = mutagen.flac.Picture()
-            picture.type = 3
+            picture.type = 3  # Front cover
             picture.mime = 'image/jpeg'
             picture.data = cover_data
             picture.width = 500
             picture.height = 500
             picture.depth = 24
             audio.add_picture(picture)
-
-        audio.save()
-        return True
+            audio.save()
+            return True
+        else:
+            print("    ⚠️ No cover data to update")
+            return False
 
     except Exception as e:
         print(f"    ❌ Error saving {flac_path.name}: {e}")
@@ -198,7 +196,7 @@ def process_file(flac_file, dry_run=False):
     if not album_artist:
         album_artist = filename_artist
 
-    print(f"  ✓ Correct metadata: {filename_artist} - {album} - {filename_title}")
+    print(f"  ✓ Found album: {album_artist} - {album}")
 
     if dry_run:
         print("  🎭 Dry run — no changes made")
@@ -206,19 +204,12 @@ def process_file(flac_file, dry_run=False):
 
     cover_data = get_cover_art(album_artist, album)
 
-    ok = update_flac_metadata(
-        flac_file,
-        track_artist=filename_artist,
-        album_artist=album_artist,
-        album=album,
-        title=filename_title,
-        cover_data=cover_data
-    )
+    ok = update_flac_cover(flac_file, cover_data=cover_data)
 
     if ok:
-        print("  ✅ Updated successfully")
+        print("  ✅ Cover art updated successfully (metadata preserved)")
     else:
-        print("  ❌ Failed to update")
+        print("  ❌ Failed to update cover art")
 
     return ok
 
@@ -237,14 +228,14 @@ def process_folder(folder_path, dry_run=False):
         if process_file(f, dry_run):
             success += 1
 
-    print(f"\n📊 RESULTS: {success}/{len(flac_files)} OK")
+    print(f"\n📊 RESULTS: {success}/{len(flac_files)} files updated")
     return success > 0
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('path')
-    parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--single', action='store_true')
+    parser = argparse.ArgumentParser(description='Add cover art to FLAC files without modifying metadata')
+    parser.add_argument('path', help='Path to FLAC file or folder')
+    parser.add_argument('--dry-run', action='store_true', help='Test without making changes')
+    parser.add_argument('--single', action='store_true', help='Process single file')
     args = parser.parse_args()
 
     path = Path(args.path)
@@ -256,4 +247,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

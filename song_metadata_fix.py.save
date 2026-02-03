@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""
+FLAC Album + Album Artist + Correct Cover Fixer
+- Uses OFFICIAL album releases only
+- Fetches cover from RELEASE (not release-group)
+- Avoids compilations, playlists, remasters when possible
+"""
+
+import io
+import re
+import time
+import argparse
+import requests
+from pathlib import Path
+from PIL import Image
+import mutagen
+from mutagen.flac import FLAC
+
+HEADERS = {"User-Agent": "FLACFixer/2.0 (contact@example.com)"}
+
+# -------------------- FILENAME PARSING --------------------
+
+def extract_info_from_filename(filename):
+    name = Path(filename).stem
+
+    patterns = [
+        r'^(.*?)\s*-\s*(.*?)$',
+        r'^(.*?)\s*–\s*(.*?)$',
+        r'^(.*?)\s*\|\s*(.*?)$',
+    ]
+
+    for p in patterns:
+        m = re.match(p, name)
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+
+    if ' - ' in name:
+        a, t = name.rsplit(' - ', 1)
+        return a.strip(), t.strip()
+
+    return "Unknown Artist", "Unknown Title"
+
+# -------------------- MUSICBRAINZ HELPERS --------------------
+
+def pick_best_release(releases):
+    """Pick earliest OFFICIAL ALBUM release"""
+    candidates = []
+
+    for r in releases:
+        if r.get("status") != "Official":
+            continue
+
+        rg = r.get("release-group", {})
+        if rg.get("primary-type") != "Album":
+            continue
+
+        date = r.get("date", "9999")
+        candidates.append((date, r))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
+def search_album_by_track(artist, title):
+    print(f"  🔍 Searching album for: {artist} - {title}")
+    time.sleep(1)  # MusicBrainz rate limit
+
+    try:
+        url = (
+            "https://musicbrainz.org/ws/2/recording/"
+            f"?query=artist:{requests.utils.quote(artist)}"
+            f"+recording:{requests.utils.quote(title)}"
+            "&inc=releases+release-groups&fmt=json"
+        )
+
+        r = requests.get(url, timeout=15, headers=HEADERS)
+        if r.status_code != 200:
+            return None, None, None
+
+        for rec in r.json().get("recordings", []):
+            best = pick_best_release(rec.get("releases", []))
+            if not best:
+                continue
+
+            album = best.get("title")
+            mbid = best.get("id")
+            ac = best.get("artist-credit", [{}])[0].get("artist", {}).get("name")
+
+            if album and mbid:
+                print(f"    ✓ Found official album: {ac} - {album}")
+                return ac, album, mbid
+
+    except Exception as e:
+        print(f"    ❌ MusicBrainz error: {e}")
+
+    return None, None, None
+
+# -------------------- COVER ART --------------------
+
+def resize_cover(data, size):
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.thumbnail((size, size), Image.Resampling.LANCZOS)
+
+        if img.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img.convert("RGBA"), mask=img.split()[-1])
+            img = bg
+
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=92)
+        return out.getvalue()
+    except Exception:
+        return data
+
+def get_cover_art_from_release(mbid, size=500):
+    print("  🎨 Fetching cover art (official release)")
+    time.sleep(1)
+
+    try:
+        url = f"https://coverartarchive.org/release/{mbid}"
+        r = requests.get(url, timeout=15)
+
+        if r.status_code != 200:
+            return None
+
+        for img in r.json().get("images", []):
+            if not img.get("front", False):
+                continue
+
+            if "Front" not in img.get("types", ["Front"]):
+                continue
+
+            return resize_cover(
+                requests.get(img["image"], timeout=15).content,
+                size
+            )
+
+    except Exception as e:
+        print(f"    ❌ Cover error: {e}")
+
+    return None
+
+# -------------------- METADATA --------------------
+
+def update_metadata(path, album, album_artist):
+    try:
+        audio = FLAC(path)
+        changed = False
+
+        for k in list(audio.keys()):
+            if k.upper().replace(" ", "") in ("ALBUM", "ALBUMARTIST"):
+                del audio[k]
+
+        if album:
+            audio["ALBUM"] = album
+            changed = True
+
+        if album_artist:
+            audio["ALBUMARTIST"] = album_artist
+            changed = True
+
+        if changed:
+            audio.save()
+
+        return changed
+
+    except Exception as e:
+        print(f"    ❌ Metadata error: {e}")
+        return False
+
+def update_cover(path, cover):
+    if not cover:
+        return False
+
+    try:
+        audio = FLAC(path)
+        audio.clear_pictures()
+
+        pic = mutagen.flac.Picture()
+        pic.type = 3
+        pic.mime = "image/jpeg"
+        pic.data = cover
+        pic.width = pic.height = 500
+        pic.depth = 24
+
+        audio.add_picture(pic)
+        audio.save()
+        return True
+
+    except Exception as e:
+        print(f"    ❌ Cover save error: {e}")
+        return False
+
+# -------------------- PROCESSING --------------------
+
+def process_file(path, dry_run=False):
+    print(f"\n🎵 Processing: {path.name}")
+
+    artist, title = extract_info_from_filename(path.name)
+    album_artist, album, mbid = search_album_by_track(artist, title)
+
+    if not album or not mbid:
+        print("  ❌ No official album found")
+        return False
+
+    if dry_run:
+        print("  🎭 Dry run — no changes made")
+        return True
+
+    cover = get_cover_art_from_release(mbid)
+    cover_ok = update_cover(path, cover)
+    meta_ok = update_metadata(path, album, album_artist)
+
+    if cover_ok:
+        print("  ✅ Cover updated")
+    if meta_ok:
+        print("  ✅ Album + Album Artist updated")
+
+    return cover_ok or meta_ok
+
+def process_folder(folder, dry_run=False):
+    files = list(Path(folder).glob("*.flac"))
+    if not files:
+        print("❌ No FLAC files found")
+        return
+
+    ok = 0
+    for f in files:
+        if process_file(f, dry_run):
+            ok += 1
+
+    print(f"\n📊 {ok}/{len(files)} files modified")
+
+# -------------------- ENTRY --------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", help="FLAC file or folder")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    p = Path(args.path)
+    if p.is_file():
+        process_file(p, args.dry_run)
+    else:
+        process_folder(p, args.dry_run)
+
+if __name__ == "__main__":
+    main()
